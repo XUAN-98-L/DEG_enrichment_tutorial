@@ -1,0 +1,198 @@
+---
+title: "00 Download GDC counts and preprocessing"
+author: ''
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include = FALSE}
+# Project root: works when (1) knitting or (2) running code in R (e.g. copy-paste)
+# Run this chunk first if you run code interactively.
+cur <- tryCatch(knitr::current_input(), error = function(e) NULL)
+path <- if (is.null(cur)) NULL else if (is.character(cur)) cur else cur[["path"]]
+if (!is.null(path) && length(path) > 0) {
+  project_root <- normalizePath(file.path(dirname(path[1]), ".."), mustWork = FALSE)
+} else {
+  wd <- getwd()
+  project_root <- if (dir.exists(file.path(wd, "Data"))) wd else normalizePath(file.path(wd, ".."), mustWork = FALSE)
+}
+if (requireNamespace("knitr", quietly = TRUE)) {
+  knitr::opts_knit$set(root.dir = project_root)
+  knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE, tidy = TRUE, tidy.opts = list(width.cutoff = 60))
+}
+# Wrap R output in PDF so long lines don't overflow
+options(width = 70)
+```
+
+# Setup
+
+Download TCGA GDC RNA-seq count files using a cart manifest, then preprocess into a merged count matrix.  
+Data: [GDC Portal](https://portal.gdc.cancer.gov/).
+
+**Running in R (copy-paste):** Set working directory to project root first, e.g. `setwd("/path/to/Tutorial")`, then run the **paths** chunk (and **packages**), then the rest in order. Or run from `Script/` — paths will still resolve.
+
+```{r paths}
+# Absolute paths from project root (same logic as setup — run setup first, or this defines project_root)
+if (!exists("project_root")) {
+  cur <- tryCatch(knitr::current_input(), error = function(e) NULL)
+  path <- if (is.null(cur)) NULL else if (is.character(cur)) cur else cur[["path"]]
+  if (!is.null(path) && length(path) > 0) {
+    project_root <- normalizePath(file.path(dirname(path[1]), ".."), mustWork = FALSE)
+  } else {
+    wd <- getwd()
+    project_root <- if (dir.exists(file.path(wd, "Data"))) wd else normalizePath(file.path(wd, ".."), mustWork = FALSE)
+  }
+}
+DATA_DIR    <- file.path(project_root, "Data")
+COUNTS_DIR  <- file.path(DATA_DIR, "gdc_counts")
+MANIFEST    <- file.path(DATA_DIR, "gdc_manifest.2026-03-12.122540.txt")
+GDC_DATA_URL <- "https://api.gdc.cancer.gov/data"
+
+COUNT_MATRIX_FILE <- file.path(paste0(DATA_DIR,"/Input"), "count_matrix.rds")
+GENE_INFO_FILE    <- file.path(paste0(DATA_DIR,"/Input"), "gene_info.rds")
+SAMPLES_FILE      <- file.path(paste0(DATA_DIR,"/Input"), "samples.rds")
+```
+
+# Packages
+
+```{r packages}
+library(httr)
+library(readr)
+library(dplyr)
+library(tibble)
+```
+
+# 1. Download GDC counts
+
+Create the output directory and read the manifest.
+
+```{r download-setup}
+dir.create(COUNTS_DIR, showWarnings = FALSE, recursive = TRUE)
+manifest <- read_tsv(MANIFEST, show_col_types = FALSE)
+n_files  <- nrow(manifest)
+message("Manifest: ", n_files, " files → ", COUNTS_DIR)
+```
+
+Download each file by GDC file UUID (skips existing files with matching MD5).
+
+```{r download-function}
+download_one <- function(file_id, filename, expected_md5 = NULL) {
+  url  <- paste(GDC_DATA_URL, file_id, sep = "/")
+  dest <- file.path(COUNTS_DIR, filename)
+  check_md5 <- !is.null(expected_md5) && !is.na(expected_md5)
+
+  if (file.exists(dest)) {
+    if (check_md5) {
+      actual <- as.character(tools::md5sum(dest))
+      if (!is.na(actual) && identical(actual, as.character(expected_md5))) {
+        message("[skip] ", filename, " (already exists, MD5 OK)")
+        return(invisible(TRUE))
+      }
+    } else {
+      message("[skip] ", filename, " (already exists)")
+      return(invisible(TRUE))
+    }
+  }
+
+  # Omit progress() when knitting to avoid stray "|" and one-line-per-page in PDF
+  prog <- if (interactive() && !knitr::is_latex_output()) progress() else list()
+  resp <- GET(url, write_disk(dest, overwrite = TRUE), prog)
+  if (http_error(resp)) {
+    warning("Failed: ", filename, " - ", status_code(resp))
+    if (file.exists(dest)) try(file.remove(dest))
+    return(invisible(FALSE))
+  }
+
+  if (check_md5) {
+    actual <- as.character(tools::md5sum(dest))
+    if (is.na(actual) || actual != as.character(expected_md5)) {
+      warning("MD5 mismatch or unreadable for ", filename)
+      return(invisible(FALSE))
+    }
+  }
+  message("[ok] ", filename)
+  invisible(TRUE)
+}
+```
+
+```{r download-run}
+for (i in seq_len(n_files)) {
+  with(manifest[i, ], download_one(id, filename, md5))
+}
+message("Download done → ", normalizePath(COUNTS_DIR))
+```
+
+# 2. Preprocessing
+
+Find count files and build a single count matrix (genes × samples).
+
+```{r find-files}
+pattern <- "\\.rna_seq\\.augmented_star_gene_counts\\.tsv$"
+count_files <- list.files(COUNTS_DIR, pattern = pattern, full.names = TRUE)
+if (length(count_files) == 0) stop("No count files found in ", COUNTS_DIR)
+length(count_files)
+```
+
+```{r read-helper}
+read_one_counts <- function(path, count_col = "unstranded") {
+  d <- read_tsv(path, comment = "#", show_col_types = FALSE)
+  if (!count_col %in% names(d)) stop("Column not found: ", count_col)
+  d <- d[, c("gene_id", "gene_name", "gene_type", count_col)]
+  d[[count_col]] <- as.numeric(d[[count_col]])
+  d
+}
+
+gene_template <- read_one_counts(count_files[1])
+gene_info <- gene_template %>%
+  select(gene_id, gene_name, gene_type) %>%
+  filter(!startsWith(gene_id, "N_"))
+```
+
+```{r build-matrix}
+sample_ids <- character(length(count_files))
+count_list <- vector("list", length(count_files))
+
+for (i in seq_along(count_files)) {
+  f <- count_files[i]
+  sample_id <- sub("\\.rna_seq\\.augmented_star_gene_counts\\.tsv$", "", basename(f))
+  sample_ids[i] <- sample_id
+  d <- read_one_counts(f) %>% filter(!startsWith(gene_id, "N_"))
+  count_list[[i]] <- setNames(d[["unstranded"]], d[["gene_id"]])
+}
+
+genes <- gene_info$gene_id
+count_matrix <- do.call(cbind, lapply(count_list, function(x) x[genes]))
+count_matrix[is.na(count_matrix)] <- 0
+rownames(count_matrix) <- genes
+colnames(count_matrix) <- sample_ids
+```
+
+```{r samples}
+samples <- tibble(
+  sample_id = sample_ids,
+  file = basename(count_files)
+)
+head(samples)
+```
+
+```{r save}
+dir.create(paste0(DATA_DIR,"/Input"), showWarnings = FALSE, recursive = TRUE)
+saveRDS(count_matrix, COUNT_MATRIX_FILE)
+saveRDS(gene_info,   GENE_INFO_FILE)
+saveRDS(samples,     SAMPLES_FILE)
+```
+
+# Summary
+
+**Done.** Count matrix: `r nrow(count_matrix)` genes × `r ncol(count_matrix)` samples.
+
+Outputs in `Data/`:
+
+- `count_matrix.rds` — raw counts (genes × samples)
+- `gene_info.rds` — gene_id, gene_name, gene_type
+- `samples.rds` — sample_id, file

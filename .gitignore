@@ -1,0 +1,8 @@
+# ignore compressed archives
+*.tar.gz
+
+# ignore gdc counts folder
+Data/gdc_counts/
+
+# optional: ignore mac files
+.DS_Store
