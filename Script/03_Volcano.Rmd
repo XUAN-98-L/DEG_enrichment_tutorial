@@ -1,0 +1,122 @@
+---
+title: "03 Volcano plot"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include = FALSE}
+cur <- tryCatch(knitr::current_input(), error = function(e) NULL)
+path <- if (is.null(cur)) NULL else if (is.character(cur)) cur else cur[["path"]]
+if (!is.null(path) && length(path) > 0) {
+  project_root <- normalizePath(file.path(dirname(path[1]), ".."), mustWork = FALSE)
+} else {
+  wd <- getwd()
+  project_root <- if (dir.exists(file.path(wd, "Data"))) wd else normalizePath(file.path(wd, ".."), mustWork = FALSE)
+}
+if (requireNamespace("knitr", quietly = TRUE)) {
+  knitr::opts_knit$set(root.dir = project_root)
+  knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+}
+options(width = 70)
+```
+
+# Setup
+
+```{r paths}
+if (!exists("project_root")) {
+  cur <- tryCatch(knitr::current_input(), error = function(e) NULL)
+  path <- if (is.null(cur)) NULL else if (is.character(cur)) cur else cur[["path"]]
+  if (!is.null(path) && length(path) > 0) {
+    project_root <- normalizePath(file.path(dirname(path[1]), ".."), mustWork = FALSE)
+  } else {
+    wd <- getwd()
+    project_root <- if (dir.exists(file.path(wd, "Data"))) wd else normalizePath(file.path(wd, ".."), mustWork = FALSE)
+  }
+}
+INPUT_DIR    <- file.path(project_root, "Results", "02_DEG")
+RESULTS_DIR  <- file.path(project_root, "Results", "03_Volcano")
+TUMOR_VS_NORMAL <- file.path(INPUT_DIR, "Tumor_vs_normal.csv")
+```
+
+# Load packages for plotting
+
+```{r packages}
+library(ggplot2)   # plotting
+library(ggrepel)   # labels (geom_label_repel)
+```
+
+# Load results
+
+```{r read-results}
+res <- read.csv(TUMOR_VS_NORMAL, row.names = 1)
+stopifnot("logFC" %in% names(res), "adj.P.Val" %in% names(res))
+res$log10FDR <- -log10(res$adj.P.Val)
+res$DEG <- "NotSig"
+res$DEG[res$logFC > 1 & res$adj.P.Val < 0.05] <- "Up"
+res$DEG[res$logFC < -1 & res$adj.P.Val < 0.05] <- "Down"
+res$DEG <- factor(res$DEG, levels = c("Down", "NotSig", "Up"))
+# Label: use gene_name if present, else row name
+res$gene_label <- if ("gene_name" %in% names(res)) res$gene_name else rownames(res)
+message("DEGs: ", sum(res$DEG != "NotSig"), " (Up: ", sum(res$DEG == "Up"), ", Down: ", sum(res$DEG == "Down"), ")")
+```
+
+# Volcano plot (unlabeled)
+
+```{r volcano}
+dir.create(RESULTS_DIR, showWarnings = FALSE, recursive = TRUE)
+xmax <- max(11, ceiling(max(abs(res$logFC))))
+p1 <- ggplot(res, aes(x = logFC, y = log10FDR, colour = DEG)) +
+  geom_point(alpha = 0.85, size = 1.5) +
+  scale_color_manual(values = c("steelblue", "gray", "brown")) +
+  xlim(c(-xmax, xmax)) +
+  geom_vline(xintercept = c(-1, 1), lty = 4, col = "black", lwd = 0.8) +
+  geom_hline(yintercept = -log10(0.05), lty = 4, col = "black", lwd = 0.8) +
+  labs(x = "logFC", y = "-log10FDR") +
+  ggtitle("Tumor vs Normal DEG") +
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "right", legend.title = element_blank()) +
+  theme_bw()
+print(p1)
+ggsave(file.path(RESULTS_DIR, "volcano_unlabeled.pdf"), p1, width = 7, height = 6)
+message("Saved ", file.path(RESULTS_DIR, "volcano_unlabeled.pdf"))
+```
+
+# Add labels (top 10 by logFC on each side)
+
+```{r add-labels}
+res$label <- ""
+# Top 10 Up (highest logFC)
+idx_up <- order(res$logFC, decreasing = TRUE)[seq_len(min(10, sum(res$logFC > 0)))]
+res$label[idx_up] <- res$gene_label[idx_up]
+# Top 10 Down (lowest logFC)
+idx_down <- order(res$logFC, decreasing = FALSE)[seq_len(min(10, sum(res$logFC < 0)))]
+res$label[idx_down] <- res$gene_label[idx_down]
+# Optional: add or overwrite specific genes by name (e.g. res$label[res$gene_label == "SPRY2"] <- "SPRY2")
+# Optional: batch: res <- res %>% mutate(label = ifelse(gene_label %in% c("CAPN11","VEGFD","PAMR1"), gene_label, label))
+```
+
+# Volcano plot with labels
+
+```{r volcano-labeled}
+xmax <- max(11, ceiling(max(abs(res$logFC))))
+p2 <- ggplot(res, aes(x = logFC, y = log10FDR, colour = DEG)) +
+  geom_point(alpha = 0.85, size = 1.5) +
+  scale_color_manual(values = c("steelblue", "gray", "brown")) +
+  xlim(c(-xmax, xmax)) +
+  geom_vline(xintercept = c(-1, 1), lty = 4, col = "black", lwd = 0.8) +
+  geom_hline(yintercept = -log10(0.05), lty = 4, col = "black", lwd = 0.8) +
+  labs(x = "logFC", y = "-log10FDR") +
+  ggtitle("Tumor vs Normal DEG") +
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "right", legend.title = element_blank()) +
+  geom_label_repel(aes(label = label), size = 3, box.padding = unit(0.5, "lines"),
+    point.padding = unit(0.8, "lines"), segment.color = "black", show.legend = FALSE, max.overlaps = 10000) +
+  theme_bw()
+print(p2)
+ggsave(file.path(RESULTS_DIR, "volcano_labeled.pdf"), p2, width = 7, height = 6)
+message("Saved ", file.path(RESULTS_DIR, "volcano_labeled.pdf"))
+```

@@ -123,7 +123,7 @@ head(metadata)
 
 # Read clinical TSV, keep selected columns, rename, and remove duplicates
 
-```{r read-clinical}
+```{r read-clinical, tidy = FALSE}
 clinical_raw <- read.delim(CLINICAL_TSV)
 clinical <- clinical_raw %>%
   select(
@@ -173,7 +173,9 @@ sample <- read.delim(SAMPLE_TSV) %>%
     sample_submitter_id = `samples.submitter_id`
   ) %>%
   filter(sample_submitter_id %in% metadata$sample_submitter_id)
-saveRDS(sample,     SAMPLE_RDS)
+  
+dir.create(RESULTS_DIR, showWarnings = FALSE, recursive = TRUE)
+saveRDS(sample, SAMPLE_RDS)
 
 # Add clinical into sample so result has one row per sample (same nrow as sample)
 clinical_one_per_case <- clinical %>% distinct(case_id, project_id, .keep_all = TRUE)
@@ -207,7 +209,6 @@ count_matrix[1:5, 1:5]
 # Save to Results/01_Preprocessing
 
 ```{r save}
-dir.create(RESULTS_DIR, showWarnings = FALSE, recursive = TRUE)
 saveRDS(metadata,     METADATA_RDS)
 saveRDS(clinical,     CLINICAL_RDS)
 saveRDS(count_matrix, file.path(RESULTS_DIR, "count_matrix.rds"))

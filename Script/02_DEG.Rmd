@@ -1,0 +1,182 @@
+---
+title: "02 Differential expression (limma)"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include = FALSE}
+cur <- tryCatch(knitr::current_input(), error = function(e) NULL)
+path <- if (is.null(cur)) NULL else if (is.character(cur)) cur else cur[["path"]]
+if (!is.null(path) && length(path) > 0) {
+  project_root <- normalizePath(file.path(dirname(path[1]), ".."), mustWork = FALSE)
+} else {
+  wd <- getwd()
+  project_root <- if (dir.exists(file.path(wd, "Data"))) wd else normalizePath(file.path(wd, ".."), mustWork = FALSE)
+}
+if (requireNamespace("knitr", quietly = TRUE)) {
+  knitr::opts_knit$set(root.dir = project_root)
+  knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+}
+options(width = 70)
+```
+
+# Setup
+
+Breast cancer (Tumor) tissues were compared to Normal tissues. Differential expression was performed with **limma** (voom); genes with **|logFC| > 1.0** and **adj.P.Val < 0.05** were considered differentially expressed.
+
+```{r paths}
+if (!exists("project_root")) {
+  cur <- tryCatch(knitr::current_input(), error = function(e) NULL)
+  path <- if (is.null(cur)) NULL else if (is.character(cur)) cur else cur[["path"]]
+  if (!is.null(path) && length(path) > 0) {
+    project_root <- normalizePath(file.path(dirname(path[1]), ".."), mustWork = FALSE)
+  } else {
+    wd <- getwd()
+    project_root <- if (dir.exists(file.path(wd, "Data"))) wd else normalizePath(file.path(wd, ".."), mustWork = FALSE)
+  }
+}
+INPUT_DIR    <- file.path(project_root, "Results", "01_Preprocessing")
+RESULTS_DIR  <- file.path(project_root, "Results", "02_DEG")
+COUNT_MATRIX_RDS <- file.path(INPUT_DIR, "count_matrix.rds")
+GENE_INFO_RDS     <- file.path("Data/Input", "gene_info.rds")
+CLINICAL_RDS    <- file.path(INPUT_DIR, "clinical.rds")
+```
+
+# Packages
+
+```{r packages}
+library(dplyr)
+library(tibble)
+library(edgeR)
+library(limma)
+```
+
+# Read data
+
+```{r read-data}
+count_matrix <- readRDS(COUNT_MATRIX_RDS)
+clinical     <- readRDS(CLINICAL_RDS)
+dim(count_matrix)
+dim(clinical)
+```
+
+# Tumor vs Normal: design
+
+```{r de-design}
+# Matrix design https://www.bioconductor.org/packages//release/workflows/vignettes/RNAseq123/inst/doc/designmatrices.html
+count_de <- count_matrix[, clinical$entity_submitter_id, drop = FALSE]
+clinical$tissue_type <- factor(clinical$tissue_type, levels = c("Normal", "Tumor"))
+design <- model.matrix(~ 0 + tissue_type, data = clinical)
+colnames(design) <- gsub("tissue_type", "", colnames(design))
+```
+
+# Filter lowly expressed genes (edgeR)
+
+As in the [limma/edgeR workflow](https://stemangiola.github.io/zhejiang2020/articles/limmaWorkflow.html), genes without worthwhile counts are removed before normalisation and voom to improve the mean-variance estimate and reduce unnecessary tests.
+
+```{r de-filter-genes}
+group <- clinical$tissue_type
+dge <- DGEList(counts = count_de, group = group)
+
+gene_info = readRDS(GENE_INFO_RDS)
+dge$genes = gene_info[match(rownames(dge), gene_info$gene_id), c("gene_id","gene_name", "gene_type")]
+
+# Keep only protein_coding genes
+dge <- dge[which(dge$genes$gene_type == "protein_coding"), , keep.lib.sizes = FALSE]
+message("Protein-coding genes: ", nrow(dge), " / ", nrow(count_de))
+
+# Transformations from the raw-scale
+cpm <- cpm(dge)
+lcpm <- cpm(dge, log=TRUE)
+L <- mean(dge$samples$lib.size) * 1e-6
+M <- median(dge$samples$lib.size) * 1e-6
+
+# Removing genes that are lowly expressed
+keep <- filterByExpr(dge, group = group)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+message("Genes retained after filterByExpr: ", nrow(dge), " / ", nrow(count_de))
+
+lcpm.cutoff <- log2(10/M + 2/L)
+nsamples <- ncol(dge)
+samplenames <- substring(colnames(dge), 12, nchar(colnames(dge)))
+par(mfrow=c(1,2))
+plot(density(lcpm[,1]), lwd=2, ylim=c(0,0.26), las=2, main="", xlab="")
+title(main="A. Raw data", xlab="Log-cpm")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+den <- density(lcpm[,i])
+lines(den$x, den$y, lwd=2)
+}
+lcpm <- cpm(dge, log=TRUE)
+plot(density(lcpm[,1]), lwd=2, ylim=c(0,0.26), las=2, main="", xlab="")
+title(main="B. Filtered data", xlab="Log-cpm")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+den <- density(lcpm[,i])
+lines(den$x, den$y, lwd=2)
+}
+```
+
+# TMM normalisation and limma voom
+
+```{r de-voom}
+dge <- calcNormFactors(dge, method = "TMM")
+
+# the expression distribution of samples for normalised data
+lcpm <- cpm(dge, log=TRUE)
+boxplot(lcpm, las=2, main="")
+title(main="Normalised data",ylab="Log-cpm")
+
+v <- voom(dge, design, plot = TRUE)
+
+fit <- lmFit(v, design)
+```
+
+# Contrasts, eBayes, and topTable
+
+```{r de-decide}
+contrasts <- makeContrasts(Tumor - Normal, levels = colnames(design))
+vfit <- contrasts.fit(fit, contrasts = contrasts)
+efit <- eBayes(vfit)
+plotSA(efit, main = "Final model: Mean-variance trend")
+
+Tumor_vs_normal <- topTable(efit, n = Inf)
+# DEGs: filter by |logFC| > 1 and adj.P.Val < 0.05
+de_genes <- Tumor_vs_normal[abs(Tumor_vs_normal$logFC) > 1 & Tumor_vs_normal$adj.P.Val < 0.05, ]
+message("DEGs (|logFC| > 1, adj.P.Val < 0.05): ", nrow(de_genes))
+```
+
+# Volcano plot
+
+```{r volcano}
+res <- as.data.frame(Tumor_vs_normal)
+res$sig <- "NotSig"
+res$sig[res$logFC > 1 & res$adj.P.Val < 0.05] <- "Up"
+res$sig[res$logFC < -1 & res$adj.P.Val < 0.05] <- "Down"
+res$sig <- factor(res$sig, levels = c("Down", "NotSig", "Up"))
+
+with(res, plot(logFC, -log10(adj.P.Val), pch = 20, main = "Volcano: Tumor vs Normal",
+  xlab = "log2 fold change", ylab = "-log10(adj.P.Val)"))
+abline(h = -log10(0.05), lty = 2)
+abline(v = c(-1, 1), lty = 2)
+with(subset(res, sig == "Up"), points(logFC, -log10(adj.P.Val), pch = 20, col = "red"))
+with(subset(res, sig == "Down"), points(logFC, -log10(adj.P.Val), pch = 20, col = "blue"))
+legend("topright", legend = c("Down", "Not sig", "Up"), pch = 20, col = c("blue", "black", "red"), bty = "n")
+```
+
+# Save
+
+```{r save}
+dir.create(RESULTS_DIR, showWarnings = FALSE, recursive = TRUE)
+saveRDS(efit, file.path(RESULTS_DIR, "efit_limma.rds"))
+saveRDS(vfit, file.path(RESULTS_DIR, "vfit_limma.rds"))
+write.csv(Tumor_vs_normal, file.path(RESULTS_DIR, "Tumor_vs_normal.csv"), row.names = TRUE)
+saveRDS(de_genes, file.path(RESULTS_DIR, "de_genes_limma.rds"))
+message("Saved to ", RESULTS_DIR)
+```
