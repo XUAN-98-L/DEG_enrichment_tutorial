@@ -55,8 +55,10 @@ RESULTS_DIR   <- file.path(project_root, "Results", "01_Preprocessing")
 METADATA_JSON <- file.path(DATA_DIR, "metadata.cart.2026-03-12.json")
 CLINICAL_TSV  <- file.path(DATA_DIR, "clinical.cart.2026-03-12", "clinical.tsv")
 SAMPLE_TSV    <- file.path(DATA_DIR, "biospecimen.cart.2026-03-12", "sample.tsv")
-METADATA_RDS  <- file.path(RESULTS_DIR, "metadata.rds")
-CLINICAL_RDS  <- file.path(RESULTS_DIR, "clinical.rds")
+METADATA_RDS    <- file.path(RESULTS_DIR, "metadata.rds")
+CLINICAL_RDS    <- file.path(RESULTS_DIR, "clinical.rds")
+SAMPLE_RDS      <- file.path(RESULTS_DIR, "sample.rds")
+COUNT_MATRIX_RDS <- file.path(INPUT_DIR, "count_matrix.rds")
 ```
 
 # Packages
@@ -171,6 +173,18 @@ sample <- read.delim(SAMPLE_TSV) %>%
     sample_submitter_id = `samples.submitter_id`
   ) %>%
   filter(sample_submitter_id %in% metadata$sample_submitter_id)
+saveRDS(sample,     SAMPLE_RDS)
+
+# Add clinical into sample so result has one row per sample (same nrow as sample)
+clinical_one_per_case <- clinical %>% distinct(case_id, project_id, .keep_all = TRUE)
+clinical <- sample %>%
+  left_join(clinical_one_per_case, by = c("case_id", "project_id"))
+
+# Add metadata into clinical
+clinical_one_per_case <- clinical %>% distinct(case_id, project_id, .keep_all = TRUE)
+metadata_caseonly = metadata %>% select(entity_submitter_id, case_id)
+clinical <- metadata_caseonly %>%
+  left_join(clinical_one_per_case, by = c("case_id"))
 ```
 
 # Add tissue_type from sample into metadata
@@ -180,18 +194,31 @@ sample <- sample %>% select(sample_submitter_id, tissue_type) %>% distinct(sampl
 metadata <- metadata %>% left_join(sample, by = "sample_submitter_id")
 ```
 
+# Read count matrix and rename columns to entity_submitter_id
+
+```{r read-count-matrix}
+count_matrix <- readRDS(COUNT_MATRIX_RDS)
+metadata$file_id_clean = gsub(".rna_seq.augmented_star_gene_counts.tsv", "",metadata$file_name)
+idx <- match(colnames(count_matrix), metadata$file_id_clean)
+colnames(count_matrix) <- ifelse(is.na(idx), colnames(count_matrix), metadata$entity_submitter_id[idx])
+count_matrix[1:5, 1:5]
+```
+
 # Save to Results/01_Preprocessing
 
 ```{r save}
 dir.create(RESULTS_DIR, showWarnings = FALSE, recursive = TRUE)
-saveRDS(metadata, METADATA_RDS)
-saveRDS(clinical,  CLINICAL_RDS)
+saveRDS(metadata,     METADATA_RDS)
+saveRDS(clinical,     CLINICAL_RDS)
+saveRDS(count_matrix, file.path(RESULTS_DIR, "count_matrix.rds"))
 message("Saved to ", RESULTS_DIR)
 message("  ", METADATA_RDS)
 message("  ", CLINICAL_RDS)
+message("  ", file.path(RESULTS_DIR, "count_matrix.rds"))
 ```
 
 **Done.**
 
-- Metadata: `r nrow(metadata)` rows × `r ncol(metadata)` columns → `Results/01_Preprocessing/metadata.rds`
-- Clinical: `r nrow(clinical)` rows → `Results/01_Preprocessing/clinical.rds`
+- Metadata: `r nrow(metadata)` rows x `r ncol(metadata)` columns -> `Results/01_Preprocessing/metadata.rds`
+- Clinical: `r nrow(clinical)` rows -> `Results/01_Preprocessing/clinical.rds`
+- Count matrix: `r nrow(count_matrix)` genes x `r ncol(count_matrix)` samples (cols = entity_submitter_id) -> `Results/01_Preprocessing/count_matrix.rds`
