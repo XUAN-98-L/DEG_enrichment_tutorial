@@ -9,3 +9,189 @@ output:
     toc: true
     toc_float: true
 ---
+
+```{r setup, include = FALSE}
+# Project root (same pattern as 00_download_gdc_counts.Rmd)
+cur <- tryCatch(knitr::current_input(), error = function(e) NULL)
+path <- if (is.null(cur)) NULL else if (is.character(cur)) cur else cur[["path"]]
+if (!is.null(path) && length(path) > 0) {
+  project_root <- normalizePath(file.path(dirname(path[1]), ".."), mustWork = FALSE)
+} else {
+  wd <- getwd()
+  project_root <- if (dir.exists(file.path(wd, "Data"))) wd else normalizePath(file.path(wd, ".."), mustWork = FALSE)
+}
+if (requireNamespace("knitr", quietly = TRUE)) {
+  knitr::opts_knit$set(root.dir = project_root)
+  knitr::opts_chunk$set(
+    echo = TRUE,
+    message = TRUE,
+    warning = TRUE,
+    tidy = TRUE,
+    tidy.opts = list(width.cutoff = 60)
+  )
+}
+# Wrap R output in PDF so long lines don't overflow
+options(width = 70)
+```
+
+# Setup
+
+Read GDC cart metadata JSON, clean into a dataframe, and save to `Data/Input/`.
+
+```{r paths}
+if (!exists("project_root")) {
+  cur <- tryCatch(knitr::current_input(), error = function(e) NULL)
+  path <- if (is.null(cur)) NULL else if (is.character(cur)) cur else cur[["path"]]
+  if (!is.null(path) && length(path) > 0) {
+    project_root <- normalizePath(file.path(dirname(path[1]), ".."), mustWork = FALSE)
+  } else {
+    wd <- getwd()
+    project_root <- if (dir.exists(file.path(wd, "Data"))) wd else normalizePath(file.path(wd, ".."), mustWork = FALSE)
+  }
+}
+DATA_DIR      <- file.path(project_root, "Data")
+INPUT_DIR     <- file.path(DATA_DIR, "Input")
+RESULTS_DIR   <- file.path(project_root, "Results", "01_Preprocessing")
+METADATA_JSON <- file.path(DATA_DIR, "metadata.cart.2026-03-12.json")
+CLINICAL_TSV  <- file.path(DATA_DIR, "clinical.cart.2026-03-12", "clinical.tsv")
+SAMPLE_TSV    <- file.path(DATA_DIR, "biospecimen.cart.2026-03-12", "sample.tsv")
+METADATA_RDS  <- file.path(RESULTS_DIR, "metadata.rds")
+CLINICAL_RDS  <- file.path(RESULTS_DIR, "clinical.rds")
+```
+
+# Packages
+
+```{r packages}
+library(jsonlite)
+library(readr)
+library(dplyr)
+library(tibble)
+```
+
+# Helper for missing JSON fields
+
+```{r helper}
+`%||%` <- function(x, y) if (is.null(x)) y else x
+```
+
+# Read metadata JSON
+
+```{r read-json}
+raw <- read_json(METADATA_JSON, simplifyVector = FALSE)
+length(raw)
+```
+
+# Clean into a dataframe
+
+Flatten top-level file fields and the first `associated_entity` (case/aliquot) per file. Nested `analysis` and `annotations` are omitted for a simple table.
+
+```{r clean-df}
+rows <- lapply(raw, function(x) {
+  ae <- if (length(x$associated_entities) > 0) x$associated_entities[[1]] else list()
+  data.frame(
+    file_id               = x$file_id %||% NA_character_,
+    file_name             = x$file_name %||% NA_character_,
+    submitter_id          = x$submitter_id %||% NA_character_,
+    data_format           = x$data_format %||% NA_character_,
+    data_category         = x$data_category %||% NA_character_,
+    data_type             = x$data_type %||% NA_character_,
+    file_size             = as.integer(x$file_size %||% NA_integer_),
+    md5sum                = x$md5sum %||% NA_character_,
+    state                 = x$state %||% NA_character_,
+    platform              = x$platform %||% NA_character_,
+    experimental_strategy = x$experimental_strategy %||% NA_character_,
+    access                = x$access %||% NA_character_,
+    case_id               = ae$case_id %||% NA_character_,
+    entity_submitter_id   = ae$entity_submitter_id %||% NA_character_,
+    entity_type           = ae$entity_type %||% NA_character_,
+    entity_id             = ae$entity_id %||% NA_character_,
+    workflow_type         = (if (!is.null(x$analysis)) x$analysis$workflow_type
+                            else NULL) %||% NA_character_,
+    stringsAsFactors      = FALSE
+  )
+})
+
+metadata <- bind_rows(rows) %>%
+  as_tibble() %>%
+  mutate(sample_submitter_id = substr(entity_submitter_id, 1, 16))
+
+dim(metadata)
+head(metadata)
+```
+
+# Read clinical TSV, keep selected columns, rename, and remove duplicates
+
+```{r read-clinical}
+clinical_raw <- read.delim(CLINICAL_TSV)
+clinical <- clinical_raw %>%
+  select(
+    project.project_id,
+    cases.case_id,
+    cases.submitter_id,
+    demographic.age_at_index,
+    demographic.gender,
+    demographic.race,
+    demographic.vital_status,
+    diagnoses.ajcc_pathologic_stage,
+    diagnoses.ajcc_pathologic_t
+  ) %>%
+  rename(
+    project_id           = project.project_id,
+    case_id              = cases.case_id,
+    submitter_id         = cases.submitter_id,
+    age         = demographic.age_at_index,
+    gender               = demographic.gender,
+    race                 = demographic.race,
+    vital_status         = demographic.vital_status,
+    ajcc_pathologic_stage = diagnoses.ajcc_pathologic_stage,
+    ajcc_pathologic_t    = diagnoses.ajcc_pathologic_t
+  ) %>%
+  mutate(has_missing = if_any(everything(), ~ . == "'--")) %>%
+  group_by(case_id) %>%
+  filter(
+    n() == 1L |                                                      # case_id occurs once: keep it
+    (n() > 1L & !has_missing) |                                     # case_id occurs multiple times: keep rows without '--'
+    (n() > 1L & sum(!has_missing) == 0L & row_number() == 1L)        # case_id occurs multiple times and all contain '--: keep at least one row
+  ) %>%
+  ungroup() %>%
+  select(-has_missing) %>%
+  distinct()
+message("Clinical: ", nrow(clinical_raw), " rows → ", nrow(clinical), " after selecting columns, cleaning duplicated case_id (drop '-- when possible, keep >= 1 per case_id), and distinct")
+```
+
+# Read sample TSV
+
+```{r read-sample}
+sample <- read.delim(SAMPLE_TSV) %>%
+  dplyr::select(project.project_id, cases.case_id, samples.tissue_type, samples.submitter_id) %>%
+  rename(
+    project_id  = `project.project_id`,
+    case_id     = `cases.case_id`,
+    tissue_type = `samples.tissue_type`,
+    sample_submitter_id = `samples.submitter_id`
+  ) %>%
+  filter(sample_submitter_id %in% metadata$sample_submitter_id)
+```
+
+# Add tissue_type from sample into metadata
+
+```{r add-tissue-type}
+sample <- sample %>% select(sample_submitter_id, tissue_type) %>% distinct(sample_submitter_id, .keep_all = TRUE)
+metadata <- metadata %>% left_join(sample, by = "sample_submitter_id")
+```
+
+# Save to Results/01_Preprocessing
+
+```{r save}
+dir.create(RESULTS_DIR, showWarnings = FALSE, recursive = TRUE)
+saveRDS(metadata, METADATA_RDS)
+saveRDS(clinical,  CLINICAL_RDS)
+message("Saved to ", RESULTS_DIR)
+message("  ", METADATA_RDS)
+message("  ", CLINICAL_RDS)
+```
+
+**Done.**
+
+- Metadata: `r nrow(metadata)` rows × `r ncol(metadata)` columns → `Results/01_Preprocessing/metadata.rds`
+- Clinical: `r nrow(clinical)` rows → `Results/01_Preprocessing/clinical.rds`
