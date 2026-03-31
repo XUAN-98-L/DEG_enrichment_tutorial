@@ -177,16 +177,16 @@ sample <- read.delim(SAMPLE_TSV) %>%
 dir.create(RESULTS_DIR, showWarnings = FALSE, recursive = TRUE)
 saveRDS(sample, SAMPLE_RDS)
 
-# Add clinical into sample so result has one row per sample (same nrow as sample)
+# Add clinical into sample, then map to entity_submitter_id via sample_submitter_id
 clinical_one_per_case <- clinical %>% distinct(case_id, project_id, .keep_all = TRUE)
 clinical <- sample %>%
+  distinct(project_id, case_id, sample_submitter_id, .keep_all = TRUE) %>%
   left_join(clinical_one_per_case, by = c("case_id", "project_id"))
 
-# Add metadata into clinical
-clinical_one_per_case <- clinical %>% distinct(case_id, project_id, .keep_all = TRUE)
-metadata_caseonly = metadata %>% select(entity_submitter_id, case_id)
-clinical <- metadata_caseonly %>%
-  left_join(clinical_one_per_case, by = c("case_id"))
+clinical <- metadata %>%
+  select(entity_submitter_id, sample_submitter_id, case_id) %>%
+  left_join(clinical, by = c("sample_submitter_id", "case_id")) %>%
+  distinct(entity_submitter_id, .keep_all = TRUE)
 ```
 
 # Add tissue_type from sample into metadata
@@ -212,10 +212,6 @@ count_matrix[1:5, 1:5]
 saveRDS(metadata,     METADATA_RDS)
 saveRDS(clinical,     CLINICAL_RDS)
 saveRDS(count_matrix, file.path(RESULTS_DIR, "count_matrix.rds"))
-message("Saved to ", RESULTS_DIR)
-message("  ", METADATA_RDS)
-message("  ", CLINICAL_RDS)
-message("  ", file.path(RESULTS_DIR, "count_matrix.rds"))
 ```
 
 **Done.**

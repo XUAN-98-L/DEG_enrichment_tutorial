@@ -1,0 +1,217 @@
+---
+title: "04 Enrichment analysis"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include = FALSE}
+cur <- tryCatch(knitr::current_input(), error = function(e) NULL)
+path <- if (is.null(cur)) NULL else if (is.character(cur)) cur else cur[["path"]]
+if (!is.null(path) && length(path) > 0) {
+  project_root <- normalizePath(file.path(dirname(path[1]), ".."), mustWork = FALSE)
+} else {
+  wd <- getwd()
+  project_root <- if (dir.exists(file.path(wd, "Data"))) wd else normalizePath(file.path(wd, ".."), mustWork = FALSE)
+}
+if (requireNamespace("knitr", quietly = TRUE)) {
+  knitr::opts_knit$set(root.dir = project_root)
+  knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+}
+options(width = 70)
+```
+
+# Setup
+
+This script keeps only the **GSEA** part of downstream enrichment analysis.  
+GSEA is performed on the full ranked gene list using **GO BP**,
+**KEGG**, and **Hallmark** gene sets.
+
+```{r paths}
+if (!exists("project_root")) {
+  cur <- tryCatch(knitr::current_input(), error = function(e) NULL)
+  path <- if (is.null(cur)) NULL else if (is.character(cur)) cur else cur[["path"]]
+  if (!is.null(path) && length(path) > 0) {
+    project_root <- normalizePath(file.path(dirname(path[1]), ".."), mustWork = FALSE)
+  } else {
+    wd <- getwd()
+    project_root <- if (dir.exists(file.path(wd, "Data"))) wd else normalizePath(file.path(wd, ".."), mustWork = FALSE)
+  }
+}
+INPUT_DIR       <- file.path(project_root, "Results", "02_DEG")
+RESULTS_DIR     <- file.path(project_root, "Results", "04_Enrichment")
+TUMOR_VS_NORMAL <- file.path(INPUT_DIR, "Tumor_vs_normal.csv")
+```
+
+# Packages
+
+```{r packages}
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(msigdbr)
+```
+
+# Read differential expression results
+
+```{r read-results}
+res <- read.csv(TUMOR_VS_NORMAL, row.names = 1)
+stopifnot("logFC" %in% names(res), "adj.P.Val" %in% names(res))
+
+res$gene_id <- sub("\\..*$", "", rownames(res))
+message("Genes in ranked list input: ", nrow(res))
+```
+
+# Map ENSEMBL to ENTREZID
+
+```{r id-map}
+id_map <- AnnotationDbi::select(
+  org.Hs.eg.db,
+  keys = unique(res$gene_id),
+  keytype = "ENSEMBL",
+  columns = c("ENTREZID", "SYMBOL")
+)
+
+id_map <- id_map %>%
+  filter(!is.na(ENTREZID)) %>%
+  distinct(ENSEMBL, .keep_all = TRUE)
+```
+
+# Ranked gene list for GSEA
+
+```{r gene-list}
+rank_df <- res %>%
+  left_join(id_map, by = c("gene_id" = "ENSEMBL")) %>%
+  filter(!is.na(ENTREZID)) %>%
+  group_by(ENTREZID) %>%
+  slice_max(order_by = abs(logFC), n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+gene_list <- rank_df$logFC
+names(gene_list) <- rank_df$ENTREZID
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+head(gene_list)
+```
+
+# GO GSEA
+
+```{r gsea-go}
+gse_go <- gseGO(
+  geneList = gene_list,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  minGSSize = 10,
+  maxGSSize = 500,
+  verbose = FALSE
+)
+
+gse_go_table <- as.data.frame(gse_go) %>%
+  arrange(p.adjust)
+
+gse_go_table %>% slice_head(n = 10)
+```
+
+# KEGG GSEA
+
+```{r gsea-kegg}
+gse_kegg <- gseKEGG(
+  geneList = gene_list,
+  organism = "hsa",
+  pAdjustMethod = "BH",
+  minGSSize = 10,
+  maxGSSize = 500,
+  verbose = FALSE
+)
+
+if (!is.null(gse_kegg) && nrow(as.data.frame(gse_kegg)) > 0) {
+  gse_kegg <- setReadable(gse_kegg, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+}
+
+gse_kegg_table <- as.data.frame(gse_kegg) %>%
+  arrange(p.adjust)
+
+gse_kegg_table %>% slice_head(n = 10)
+```
+
+# Hallmark GSEA
+
+```{r gsea-hallmark}
+hallmark_raw <- msigdbr(species = "Homo sapiens", collection = "H")
+hallmark_raw$entrez_gene <- hallmark_raw$ncbi_gene
+
+hallmark <- hallmark_raw %>%
+  dplyr::select(gs_name, entrez_gene)
+
+gsea_hallmark <- GSEA(
+  geneList = gene_list,
+  TERM2GENE = hallmark,
+  pAdjustMethod = "BH",
+  minGSSize = 10,
+  maxGSSize = 500,
+  verbose = FALSE
+)
+
+gsea_hallmark_table <- as.data.frame(gsea_hallmark) %>%
+  arrange(p.adjust)
+
+gsea_hallmark_table %>% slice_head(n = 10)
+```
+
+# Plots
+
+```{r plots}
+dir.create(RESULTS_DIR, showWarnings = FALSE, recursive = TRUE)
+
+p_gse_go <- dotplot(gse_go, showCategory = 10) + ggtitle("GSEA GO BP")
+print(p_gse_go)
+ggsave(file.path(RESULTS_DIR, "GSEA_GO_dotplot.pdf"), p_gse_go, width = 9, height = 8)
+
+top_id_go <- gse_go@result$ID[1]
+top_title_go <- gse_go@result$Description[1]
+p_go_one <- gseaplot2(gse_go, geneSetID = top_id_go, title = top_title_go)
+print(p_go_one)
+ggsave(file.path(RESULTS_DIR, "GSEA_GO_1.pdf"), p_go_one, width = 9, height = 6.5)
+
+p_gse_kegg <- dotplot(gse_kegg, showCategory = 10) + ggtitle("GSEA KEGG")
+print(p_gse_kegg)
+ggsave(file.path(RESULTS_DIR, "GSEA_KEGG_dotplot.pdf"), p_gse_kegg, width = 9, height = 8)
+
+top_id_kegg <- gse_kegg@result$ID[1]
+top_title_kegg <- gse_kegg@result$Description[1]
+p_kegg_one <- gseaplot2(gse_kegg, geneSetID = top_id_kegg, title = top_title_kegg)
+print(p_kegg_one)
+ggsave(file.path(RESULTS_DIR, "GSEA_KEGG_1.pdf"), p_kegg_one, width = 9, height = 6.5)
+
+p_hallmark <- dotplot(gsea_hallmark, showCategory = 10) + ggtitle("GSEA Hallmark")
+print(p_hallmark)
+ggsave(file.path(RESULTS_DIR, "Hallmark_GSEA_dotplot.pdf"), p_hallmark, width = 9, height = 8)
+
+top_id_hallmark <- gsea_hallmark@result$ID[1]
+top_title_hallmark <- gsea_hallmark@result$Description[1]
+p_hallmark_one <- gseaplot2(gsea_hallmark, geneSetID = top_id_hallmark, title = top_title_hallmark)
+print(p_hallmark_one)
+ggsave(file.path(RESULTS_DIR, "Hallmark_GSEA_1.pdf"), p_hallmark_one, width = 9, height = 6.5)
+```
+
+# Save tables
+
+```{r save}
+write.csv(gse_go_table %>% slice_head(n = 10), file.path(RESULTS_DIR, "GSEA_GO.csv"), row.names = FALSE)
+write.csv(gse_kegg_table %>% slice_head(n = 10), file.path(RESULTS_DIR, "GSEA_KEGG.csv"), row.names = FALSE)
+write.csv(gsea_hallmark_table %>% slice_head(n = 10), file.path(RESULTS_DIR, "Hallmark_GSEA.csv"), row.names = FALSE)
+
+saveRDS(gse_go, file.path(RESULTS_DIR, "gse_go.rds"))
+saveRDS(gse_kegg, file.path(RESULTS_DIR, "gse_kegg.rds"))
+saveRDS(gsea_hallmark, file.path(RESULTS_DIR, "gsea_hallmark.rds"))
+```

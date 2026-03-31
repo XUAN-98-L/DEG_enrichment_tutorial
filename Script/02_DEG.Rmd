@@ -178,5 +178,4 @@ saveRDS(efit, file.path(RESULTS_DIR, "efit_limma.rds"))
 saveRDS(vfit, file.path(RESULTS_DIR, "vfit_limma.rds"))
 write.csv(Tumor_vs_normal, file.path(RESULTS_DIR, "Tumor_vs_normal.csv"), row.names = TRUE)
 saveRDS(de_genes, file.path(RESULTS_DIR, "de_genes_limma.rds"))
-message("Saved to ", RESULTS_DIR)
 ```

@@ -83,7 +83,6 @@ p1 <- ggplot(res, aes(x = logFC, y = log10FDR, colour = DEG)) +
   theme_bw()
 print(p1)
 ggsave(file.path(RESULTS_DIR, "volcano_unlabeled.pdf"), p1, width = 7, height = 6)
-message("Saved ", file.path(RESULTS_DIR, "volcano_unlabeled.pdf"))
 ```
 
 # Add labels (top 10 by logFC on each side)
@@ -118,5 +117,4 @@ p2 <- ggplot(res, aes(x = logFC, y = log10FDR, colour = DEG)) +
   theme_bw()
 print(p2)
 ggsave(file.path(RESULTS_DIR, "volcano_labeled.pdf"), p2, width = 7, height = 6)
-message("Saved ", file.path(RESULTS_DIR, "volcano_labeled.pdf"))
 ```
